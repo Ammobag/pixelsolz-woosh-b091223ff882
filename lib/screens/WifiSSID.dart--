@@ -1,0 +1,738 @@
+import 'dart:convert';
+
+import 'package:flutter/material.dart';
+import 'package:flutter_blue/flutter_blue.dart';
+import 'package:flutter_spinkit/flutter_spinkit.dart';
+import 'package:font_awesome_flutter/font_awesome_flutter.dart';
+import 'package:whoosh/core/BaseDeviceSetupPage.dart';
+import 'package:whoosh/core/dataAccess/HubDataAccess.dart';
+import 'package:whoosh/core/widgets/Input.dart';
+import 'package:whoosh/core/widgets/TextX.dart';
+import 'package:wifi_iot/wifi_iot.dart';
+
+enum WifiStatus {
+  initial,
+  connected,
+  disconnected,
+  connecting,
+  nointernet,
+  mqttnotconnected
+}
+
+class WiFiSSID extends BaseDeviceSetupPage {
+  final Function() onWifiConnected;
+  final Function(bool) setLoader;
+  final BluetoothDevice bluetoothService;
+  WiFiSSID(
+      {Key? key,
+      required this.onWifiConnected,
+      String? password,
+      required this.bluetoothService,required this.setLoader})
+      : super(key: key);
+
+  @override
+  _WiFiSSIDState createState() => _WiFiSSIDState();
+}
+
+class _WiFiSSIDState extends BaseDeviceSetupState<WiFiSSID> with MainPage {
+  WifiStatus _wifiStatus = WifiStatus.initial;
+  //WifiStatus.disconnected;
+  List<WifiNetwork> wifis = [];
+  TextEditingController _textFieldController = TextEditingController();
+  TextEditingController _ssidFieldController = TextEditingController();
+  bool _passwordObsecure = true;
+  late StateSetter _setState;
+  // ignore: non_constant_identifier_names
+  final String BLE_SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+
+  final String BLE_CHARACTERISTIC_ACK_UUID =
+      "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
+  // ignore: non_constant_identifier_names
+  final String BLE_CHARACTERISTIC_WRITE_UUID =
+      "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
+  // ignore: non_constant_identifier_names
+  final String BLE_CHARACTERISTIC_READ_UUID =
+      "6e400004-b5a3-f393-e0a9-e50e24dcca9e";
+  final HubDataAccess hubDataAccess = HubDataAccess();
+  bool isclickable = true;
+  @override
+  void initState() {
+    super.initState();
+    getAllWifiNetworks();
+  }
+
+  Future<void> scanForWIFI() async {
+    List<BluetoothService> services = await widget.bluetoothService.discoverServices();
+    services.forEach((service) async {
+      if (service.uuid.toString() == BLE_SERVICE_UUID) {
+        service.characteristics.forEach((characteristic) async {
+          if (characteristic.properties.read &&
+              characteristic.uuid.toString() == BLE_CHARACTERISTIC_READ_UUID) {
+            List<int> ssidBuffers = await characteristic.read();
+            List<String> ssids = utf8.decode(ssidBuffers).split(',');
+            List<Map<String, String>> wifiSsids = [];
+            for (int i = 0; i < ssids.length; i++)
+              if (ssids[i].length > 0) {
+                wifiSsids.add({"ssid": ssids[i]});
+              }
+          }
+        });
+      }
+    });
+  }
+  
+  getAllWifiNetworks() async {
+    
+    List<WifiNetwork> wifinetworks = await WiFiForIoTPlugin.loadWifiList();
+    wifis = wifinetworks.where((i) {
+      if(i.frequency !=null && i.frequency! <5000 && !i.ssid!.startsWith("HUB"))
+        return true;
+      return false;
+    }).toList();
+    setState(() {});
+    List<BluetoothService> services = await widget.bluetoothService.discoverServices();
+    print(services);
+  }
+  connectWifi(ssid, password) async {
+    //if(widget.bluetoothService.)
+    if (mounted) {
+      setState(() {
+        _wifiStatus = WifiStatus.connecting;
+        isclickable = false;
+      });
+    }
+    widget.setLoader(true);
+    widget.showPageLoader(context, true);
+    await widget.bluetoothService.disconnect();
+    await widget.bluetoothService.connect(autoConnect: false);
+    var data =
+        await HubDataAccess.linkUser(widget.bluetoothService.name.toString());
+    print(widget.bluetoothService.name);
+    List<BluetoothService> services =
+        await widget.bluetoothService.discoverServices();
+
+    try {
+      services.forEach((service) {
+        if (service.uuid.toString() == BLE_SERVICE_UUID) {
+          service.characteristics.forEach((characteristic) async {
+            if (characteristic.properties.write &&
+                characteristic.uuid.toString() ==
+                    BLE_CHARACTERISTIC_WRITE_UUID) {
+              String passkey = "12345";
+              if (data.result != null) {
+                passkey = data.result!.passKey ?? "23";
+              }
+
+              String dataString =
+                  '{"ssid": "$ssid", "password": "$password", "passkey":"$passkey","uuid":"6e400003-b5a3-f393-e0a9-e50e24dcca9e"}';
+              print(passkey);
+              try {
+                await characteristic.write(utf8.encode(dataString));
+              } catch (e) {
+                print(e.toString());
+              }
+            }
+
+            if (characteristic.uuid.toString() == BLE_CHARACTERISTIC_ACK_UUID &&
+                characteristic.properties.notify) {
+              try {
+                await Future.delayed(new Duration(seconds: 5), () async {});
+                await characteristic.setNotifyValue(true);
+                characteristic.value.listen((value) async{
+                  print("noify success");
+                  print(value);
+                  if (value.length > 0) {
+                    if (value[0] == 2) {
+                      //widget.bluetoothService.disconnect();
+                      _wifiStatus = WifiStatus.disconnected;
+                      if(mounted){
+                        setState(() {});
+                      }
+                      
+                    } else if (value[0] == 4) {
+                      _wifiStatus = WifiStatus.nointernet;
+                      if(mounted){
+                        setState(() {});
+                      }
+                      //widget.onWifiConnected();
+                      //_navigatorKey.currentState!.pushNamed(routeDeviceSetupFilterSetupPrimerPage);
+                    } else if (value[0] == 8) {
+                      _wifiStatus = WifiStatus.mqttnotconnected;
+                      //widget.bluetoothService.disconnect();
+                      if(mounted){
+                        setState(() {});
+                      }
+                    } else if (value[0] == 128) {
+                      setState(() {
+                        //_wifiStatus = WifiStatus.connected;
+                      });
+                      //await widget.bluetoothService.disconnect();
+                      widget.onWifiConnected();
+                      //_navigatorKey.currentState!.pushNamed(routeDeviceSetupFilterSetupPrimerPage);
+                    }
+                    if(mounted){
+                      if(value[0] == 2 || value[0] == 4 || value[0] == 8 || value[0] == 128)
+                      {
+                        widget.setLoader(false);
+                        widget.showPageLoader(context, false);
+                        isclickable = true;
+                        setState(() {});
+                      }
+
+                    }
+                    
+                  }
+                });
+              } catch (e) {
+                print(e.toString());
+                await widget.bluetoothService.disconnect();
+                isclickable = true;
+                setState(() {
+                  
+                });
+              }
+            }
+          });
+        }
+      });
+    } catch (e) {
+      print(e.toString());
+    }
+  }
+/*   connectWifi(ssid, password) async {
+    //if(widget.bluetoothService.)
+    await widget.bluetoothService.disconnect();
+    await widget.bluetoothService.connect(autoConnect: false);
+    var data =  await HubDataAccess.linkUser(widget.bluetoothService.name.toString());
+    print(widget.bluetoothService.name);
+    List<BluetoothService> services = await widget.bluetoothService.discoverServices();
+    try{
+      services.forEach((service) {
+        if (service.uuid.toString() == BLE_SERVICE_UUID) {
+          service.characteristics.forEach((characteristic) async {
+                if (characteristic.properties.write && characteristic.uuid.toString() ==
+                        BLE_CHARACTERISTIC_WRITE_UUID){
+                        String passkey =  "12345";
+                        if(data.result != null){
+                          passkey = data.result!.passKey ?? "23";
+                        }
+                        
+                        String dataString = '{"ssid": "$ssid", "password": "$password", "passkey":"$passkey","uuid":"6e400003-b5a3-f393-e0a9-e50e24dcca9e"}';
+                        print(passkey);
+                        try{
+                          
+                          setState(() {
+                            _wifiStatus = WifiStatus.connecting;
+                          });
+                            await characteristic.write(utf8.encode(dataString));
+                        }
+                        catch(e){
+                          print(e.toString());
+                        }
+                }
+
+                if (characteristic.uuid.toString() ==
+                  BLE_CHARACTERISTIC_ACK_UUID && characteristic.properties.notify){
+                  try{
+                  await Future.delayed(new Duration(seconds: 5), () async{
+                    
+                  });
+                    await characteristic.setNotifyValue(true);
+                    characteristic.value.listen((value) {
+                        print("noify success");
+                        print(value);
+                        if(value.length>0){
+                          if(value[0] == 2){
+                            //widget.bluetoothService.disconnect();
+                            setState(() {
+                              _wifiStatus = WifiStatus.disconnected;
+                            });
+                          }
+                          else if(value[0] == 4){
+                            setState(() {
+                              _wifiStatus = WifiStatus.nointernet;
+                            });
+                            //widget.onWifiConnected();
+                            //_navigatorKey.currentState!.pushNamed(routeDeviceSetupFilterSetupPrimerPage);
+                          }
+                          else if(value[0] == 8){
+                            //widget.bluetoothService.disconnect();
+                            setState(() {
+                              _wifiStatus = WifiStatus.mqttnotconnected;
+                            });
+                          }
+                          else if(value[0] == 128){
+                            setState(() {
+                              //_wifiStatus = WifiStatus.connected;
+                            });
+                            widget.onWifiConnected();
+                            //_navigatorKey.currentState!.pushNamed(routeDeviceSetupFilterSetupPrimerPage);
+                          }
+                        }
+                    });
+                }
+                catch(e){
+                  print(e.toString());
+                } 
+             }
+              
+          });
+        }
+      });
+    } catch (e) {
+      print(e.toString());
+    }
+  } */
+
+  @override
+    Widget body() {
+    return Container(
+      padding: EdgeInsets.symmetric(
+        horizontal: MediaQuery.of(context).size.width * 0.053,
+      ),
+      child: Column(
+        children: <Widget>[
+          Flexible(
+            flex: 83,
+            child: Container(
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    SizedBox(
+                      height: MediaQuery.of(context).size.height * 0.049,
+                    ),
+                    Container(
+                      height: 44,
+                      width: 44,
+                      decoration: BoxDecoration(
+                        color: Color(0xffEBEBEA),
+                        borderRadius: BorderRadius.all(
+                          Radius.circular(50),
+                        ),
+                      ),
+                      child: Center(
+                        child: Text(
+                          '2',
+                          style: TextStyle(
+                            fontWeight: FontWeight.w700,
+                            fontSize: 20,
+                          ),
+                        ),
+                      ),
+                    ),
+                    SizedBox(
+                      height: MediaQuery.of(context).size.height * 0.024,
+                    ),
+                    TextX.heading("Connect to Wi-Fi"),
+                    /* SizedBox(
+                      height: MediaQuery.of(context).size.height * 0.014,
+                    ), */
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        TextX.subHeading(
+                            "Select a wi-fi network to connect to"),
+                        Row(
+                          children: [
+                            GestureDetector(
+                              onTap: () {
+                                getAllWifiNetworks();
+                              },
+                              child: Padding(
+                                padding: EdgeInsets.only(right: 0),
+                                child: Icon(
+                                  Icons.refresh,
+                                  color: Theme.of(context).primaryColor,
+                                ),
+                              ),
+                            ),
+                            IconButton(
+                                onPressed: () async {
+                                  return customSsid();
+                                },
+                                icon: Icon(Icons.add),
+                                color: Theme.of(context).primaryColor)
+                          ],
+                        )
+                      ],
+                    ),
+                    SizedBox(
+                      height: MediaQuery.of(context).size.height * 0.039,
+                    ),
+                    Container(
+                        height: MediaQuery.of(context).size.height * 0.48,
+                        //color: Colors.red,
+                        child: ListView.builder(
+                            itemCount: wifis.length,
+                            itemBuilder: (context, i) {
+                              return getWifiList(wifis[i]);
+                            })),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          Flexible(flex: 17, child: getWifiStatusView())
+        ],
+      ),
+    );
+  }
+  /* Widget body() {
+    return Container(
+      padding: EdgeInsets.symmetric(
+        horizontal: MediaQuery.of(context).size.width * 0.053,
+      ),
+      child: Column(
+        children: <Widget>[
+          Flexible(
+            flex: 83,
+            child: Container(
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    SizedBox(
+                      height: MediaQuery.of(context).size.height * 0.049,
+                    ),
+                    Container(
+                      height: 44,
+                      width: 44,
+                      decoration: BoxDecoration(
+                        color: Color(0xffEBEBEA),
+                        borderRadius: BorderRadius.all(
+                          Radius.circular(50),
+                        ),
+                      ),
+                      child: Center(
+                        child: Text(
+                          '2',
+                          style: TextStyle(
+                            fontWeight: FontWeight.w700,
+                            fontSize: 20,
+                          ),
+                        ),
+                      ),
+                    ),
+                    SizedBox(
+                      height: MediaQuery.of(context).size.height * 0.024,
+                    ),
+                    TextX.heading("Connect to Wi-Fi"),
+                    SizedBox(
+                      height: MediaQuery.of(context).size.height * 0.014,
+                    ),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        TextX.subHeading("Select a wi-fi network to connect to"),
+                        Row(
+                          children: [
+                            GestureDetector(
+                              onTap: () {
+                                getAllWifiNetworks();
+                              },
+                              child: Padding(
+                                padding: EdgeInsets.only(right: 0),
+                                child: Icon(
+                                  Icons.refresh,
+                                  color: Theme.of(context).primaryColor,
+                                ),
+                              ),
+                            ),
+                            IconButton(
+                                onPressed: () async {
+                                  return customSsid();
+                                },
+                                icon: Icon(Icons.add),
+                                color: Theme.of(context).primaryColor)
+                          ],
+                        )
+                      ],
+                    ),
+                    SizedBox(
+                      height: MediaQuery.of(context).size.height * 0.039,
+                    ),
+                    Container(
+                        height: MediaQuery.of(context).size.height * 0.48,
+                        //color: Colors.red,
+                        child: ListView.builder(
+                            itemCount: wifis.length,
+                            itemBuilder: (context, i) {
+                              return getWifiList(wifis[i]);
+                            })),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          Flexible(flex: 17, child: getWifiStatusView())
+        ],
+      ),
+    );
+  } */
+
+ customSsid() {
+    return showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+            title: Text('Type your ssid'),
+            content: StatefulBuilder(
+              builder: (BuildContext context, StateSetter stateSetter) {
+                _setState = stateSetter;
+                return Input.getTextField(
+                    _ssidFieldController, false, "Ssid", null);
+              },
+            ),
+            actions: <Widget>[
+              Container(
+                //height: 100,
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Flexible(
+                      child: TextButton(
+                        child: Text('CANCEL'),
+                        onPressed: () {
+                          Navigator.pop(context);
+                        },
+                      ),
+                    ),
+                    Flexible(
+                      child: TextButton(
+                        child: Text('OK'),
+                        onPressed: () {
+                          print("object");
+                          if (_ssidFieldController.text != "") {
+                            Navigator.pop(context);
+                            WifiNetwork wifi = WifiNetwork.fromJson({});
+                            wifi.ssid = "";
+                            _getWiFiPassword(wifi);
+                          }
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+              )
+            ]);
+      },
+    );
+  }
+
+  bool showDefaultAppBar() {
+    return false;
+  }
+
+  getWifiStatusView() {
+    if (_wifiStatus == WifiStatus.connecting) {
+      return Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: <Widget>[
+          SpinKitRipple(
+            itemBuilder: (BuildContext context, int index) {
+              return DecoratedBox(
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: Colors.green,
+                ),
+              );
+            },
+          ),
+          Text(
+            'Connecting to Wi-Fi network...',
+            style: TextStyle(
+              fontWeight: FontWeight.w600,
+              fontSize: 17,
+            ),
+          )
+        ],
+      );
+    } else if (_wifiStatus == WifiStatus.connected) {
+      return Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: <Widget>[
+          Icon(
+            Icons.check_circle_outlined,
+            color: Colors.green,
+            size: 40,
+          ),
+          SizedBox(
+            height: MediaQuery.of(context).size.height * 0.01,
+          ),
+          Text(
+            'Wi-Fi connection successful',
+            style: TextStyle(
+              fontWeight: FontWeight.w600,
+              fontSize: 17,
+            ),
+          )
+        ],
+      );
+    } else if (_wifiStatus == WifiStatus.disconnected) {
+      return Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: <Widget>[
+          Icon(
+            FontAwesomeIcons.crosshairs,
+            color: Colors.red,
+            size: 40,
+          ),
+          SizedBox(
+            height: MediaQuery.of(context).size.height * 0.01,
+          ),
+          Text(
+            'Please give correct wifi credentials',
+            style: TextStyle(
+              fontWeight: FontWeight.w600,
+              fontSize: 17,
+            ),
+          )
+        ],
+      );
+    } else if (_wifiStatus == WifiStatus.nointernet) {
+      return Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: <Widget>[
+          Icon(
+            FontAwesomeIcons.crosshairs,
+            color: Colors.red,
+            size: 40,
+          ),
+          SizedBox(
+            height: MediaQuery.of(context).size.height * 0.01,
+          ),
+          Text(
+            'Connected but no internet',
+            style: TextStyle(
+              fontWeight: FontWeight.w600,
+              fontSize: 17,
+            ),
+          )
+        ],
+      );
+    }
+    else if(_wifiStatus ==  WifiStatus.mqttnotconnected){
+      return Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: <Widget>[
+          Icon(
+            FontAwesomeIcons.crosshairs,
+            color: Colors.red,
+            size: 40,
+          ),
+          SizedBox(
+            height: MediaQuery.of(context).size.height * 0.01,
+          ),
+          Text(
+            'Sorry Mqtt connection failed',
+            style: TextStyle(
+              fontWeight: FontWeight.w600,
+              fontSize: 17,
+            ),
+          )
+        ],
+      );
+    }
+    return SizedBox.shrink();
+  }
+
+  getWifiList(WifiNetwork wifiNetwork) {
+    return GestureDetector(
+      onTap: () async {
+         if(isclickable){
+           _getWiFiPassword(wifiNetwork);
+         }
+        
+      },
+      child: Container(
+        height: MediaQuery.of(context).size.height * 0.062,
+        decoration: BoxDecoration(
+          color: Colors.white,
+        ),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: <Widget>[
+              Text(wifiNetwork.ssid!),
+              Row(
+                children: <Widget>[
+                  Icon(
+                    Icons.wifi_outlined,
+                  ),
+                  Icon(
+                    Icons.chevron_right,
+                  ),
+                ],
+              )
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  IconButton getPasswordIconButton() {
+    return IconButton(
+      icon: Icon(
+        !_passwordObsecure ? Icons.visibility : Icons.visibility_off,
+        color: Theme.of(context).primaryColorDark,
+      ),
+      onPressed: () {
+        _setState(() {
+          _passwordObsecure = !_passwordObsecure;
+        });
+      },
+    );
+  }
+
+  _getWiFiPassword(WifiNetwork wifiNetwork) {
+    return showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+            title: Text('Type your password'),
+            content: StatefulBuilder(
+              builder: (BuildContext context, StateSetter stateSetter) {
+                _setState = stateSetter;
+                return Input.getTextField(_textFieldController,
+                    _passwordObsecure, "password", getPasswordIconButton());
+              },
+            ),
+            actions: <Widget>[
+              Container(
+                //height: 100,
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Flexible(
+                      child: TextButton(
+                        child: Text('CANCEL'),
+                        onPressed: () {
+                          Navigator.pop(context);
+                        },
+                      ),
+                    ),
+                    Flexible(
+                      child: TextButton(
+                        child: Text('OK'),
+                        onPressed: () {
+                          if (_textFieldController.text != "") {
+                            connectWifi(
+                                wifiNetwork.ssid, _textFieldController.text);
+                          }
+                          Navigator.pop(context);
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+              )
+            ]);
+      },
+    );
+  }
+}
